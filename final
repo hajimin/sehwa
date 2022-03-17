@@ -26,9 +26,9 @@ ipak(pkg)
 
 # ------------------------------- connection --------------------------------
 
-# file_path <- glue("D:/{list.files('D:/', pattern = 'sehwa_code_SN001')}/")
+file_path <- glue("D:/{list.files('D:/', pattern = 'sehwa_code_SN001')}/")
 
-# args <- read.delim(paste0(file_path, "con_names.txt"), sep = ",", header = F)
+args <- read.delim(paste0(file_path, "con_names.txt"), sep = ",", header = F)
 
 con <- dbConnect(MySQL(),
                  dbname = db_input1,
