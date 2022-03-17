@@ -1,1 +1,461 @@
-import test
+rm(list = ls())
+gc()
+
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg))
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+pkg <- c("data.table", "dplyr", "lubridate", "bit64", "stringr", "ggplot2",
+         "tidyr", "DBI", "RMySQL", "RJDBC", "reshape2", "stats",
+         "changepoint", "useful", "dbscan", "useful", "tsne", "purrr", 'readr',
+         "fastDummies", "glue", "xgboost")
+
+ipak(pkg)
+
+{options(scipen = 100)
+  options(digits.secs = 3)
+  options(stringsAsFactors = F)
+  options(warn = -1)
+  `%notin%` <- Negate(`%in%`)
+  `%notlike%` <- Negate(`%like%`)}
+
+
+
+# ------------------------------- connection --------------------------------
+
+# file_path <- glue("D:/{list.files('D:/', pattern = 'sehwa_code_SN001')}/")
+
+# args <- read.delim(paste0(file_path, "con_names.txt"), sep = ",", header = F)
+
+con <- dbConnect(MySQL(),
+                 dbname = db_input1,
+                 user = user_input,
+                 password = pw_input,
+                 host = host_input)
+
+dbSendQuery(con, "SET NAMES utf8;")
+dbSendQuery(con, "SET CHARACTER SET utf8;")
+dbSendQuery(con, "SET character_set_connection=utf8;")
+
+ANALYSIS_START_TS = ymd_hms(Sys.time(), tz ='Asia/Seoul')
+# time_crit_sql_1 <- "SELECT max(MIN_DTCT_TS) AS 'max(DTCT_TS)' FROM table_creat_log WHERE TABLE_NM = 'stat_resi_h_tlds' AND DEV_GUBUN = 'DEV_2'"
+time_crit_sql_2 <- "SELECT min(DTCT_TS) FROM value_tlds"
+time_crit_sql_3 <- "SELECT max(DTCT_TS) FROM value_tlds"
+
+real_time <- ymd_hms(paste0(substr(str_replace_all(Sys.time(), "[^[:alnum:]]", ""), 1, 8), "000000.0001"), tz ='Asia/Seoul')
+# h_times <- dbGetQuery(con, time_crit_sql_1)
+min_times <- dbGetQuery(con, time_crit_sql_2)
+min_times <- ymd_hms(paste0(substr(str_replace_all(min_times$`min(DTCT_TS)`, "[^[:alnum:]]", ""), 1, 10), "0000.0001"), tz ='Asia/Seoul')
+max_times <- dbGetQuery(con, time_crit_sql_3)
+max_times <- ymd_hms(paste0(substr(str_replace_all(max_times$`max(DTCT_TS)`, "[^[:alnum:]]", ""), 1, 10), "0000.0001"), tz ='Asia/Seoul')
+
+start_time <- min_times
+end_time <- ymd_hms(ifelse(real_time >= max_times,
+                           format(max_times, "%Y-%m-%d %H:%M:%OS3"),
+                           format(real_time, "%Y-%m-%d %H:%M:%OS3")), tz ='Asia/Seoul')
+
+
+time.root <- data.frame(MIN_DTCT_TS = seq(from = start_time, 
+                                          to = end_time,  
+                                          by = '1 hours'),
+                        MAX_DTCT_TS = seq(from = start_time + days(1)
+                                          , 
+                                          to = end_time + days(1),
+                                          by = '1 hours'))
+
+
+for(roop in c(1:nrow(time.root))){
+  roop <- 6
+  
+  crit_min_time <- time.root[roop, 'MIN_DTCT_TS']
+  crit_max_time <- time.root[roop, 'MAX_DTCT_TS'] + seconds(-0.001)
+  
+  tlds <- dbGetQuery(con, paste0("SELECT * FROM value_tlds ",
+                                 " where DTCT_TS >= ", "'", time.root[roop, 'MIN_DTCT_TS'], "'",
+                                 " and DTCT_TS < ", "'", time.root[roop, 'MAX_DTCT_TS'], "'"))
+  
+  
+  tlds$DEV_NM <- iconv(tlds$DEV_NM, from = 'UTF-8')
+  
+  tlds <- tlds %>% mutate(OCCUPNCY_YN = OCCUPNCY_YN %>% as.integer())
+  
+  
+  CONDI_TABLE <- dbGetQuery(con, "SELECT * FROM test_condition WHERE USE_YN like 'Y'")%>% 
+    filter(DEV_GUBUN %like% '100_TLDS')
+  CONDI_TABLE$CONDI_CONTENT <- iconv(CONDI_TABLE$CONDI_CONTENT, from = 'UTF8')
+  item_map <- data.frame(ITEM_NM = c("MAJOR_TX_VOLT", "MINR_TX_VOLT", "MAJOR_RX_VOLT", "MINR_RX_VOLT"))
+  
+  add_value_tlds_all <- dbGetQuery(con, glue("SELECT t2.AREA_ID, t2.DEV_GUBUN, t2.DEV_NM, t2.DTCT_TS, 
+                                                       t1.MAJOR_TX_VOLT, t1.MINR_TX_VOLT, t1.MAJOR_RX_VOLT, t1.MINR_RX_VOLT, t1.OCCUPNCY_YN_LAG1
+                                                FROM (SELECT AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, 
+                                                      MAJOR_TX_VOLT, MINR_TX_VOLT, MAJOR_RX_VOLT, MINR_RX_VOLT, CAST(OCCUPNCY_YN AS INT) AS OCCUPNCY_YN_LAG1 
+                                                      FROM value_tlds
+                                                      WHERE DTCT_TS >= '{time.root[roop, 'MIN_DTCT_TS'] + days(-3)}' 
+                                                      AND DTCT_TS < '{time.root[roop, 'MIN_DTCT_TS']}' 
+                                                      AND DEV_GUBUN = '100_TLDS_IMP') t1 
+                                                RIGHT JOIN (SELECT AREA_ID, DEV_GUBUN, DEV_NM, max(DTCT_TS) AS DTCT_TS 
+                                                            FROM value_tlds
+                                                            WHERE DTCT_TS >= '{time.root[roop, 'MIN_DTCT_TS'] + days(-3)}' 
+                                                            AND DTCT_TS < '{time.root[roop, 'MIN_DTCT_TS']}' 
+                                                            AND DEV_GUBUN = '100_TLDS_IMP' 
+                                                            GROUP BY AREA_ID, DEV_GUBUN, DEV_NM) t2
+                                                ON (t1.AREA_ID = t2.AREA_ID AND t1.DEV_GUBUN = t2.DEV_GUBUN AND t1.DEV_NM = t2.DEV_NM AND t1.DTCT_TS = t2.DTCT_TS)
+                                                WHERE OCCUPNCY_YN_LAG1 = '0'"))
+  
+  if(nrow(add_value_tlds_all) != 0) {
+    add_value_tlds_all$DEV_NM <- iconv(add_value_tlds_all$DEV_NM, from = 'UTF-8')
+  }
+  
+  
+  
+  
+  # ------------------------------------------- condi_0001 ----------------------------------------------
+  # 점유시 검측값 비감소
+  
+  
+  condi_detect_type_1 <- data.frame() 
+  
+  item_map <- data.frame(ITEM_NM = c("MAJOR_TX_VOLT", "MINR_TX_VOLT", "MAJOR_RX_VOLT", "MINR_RX_VOLT"))
+  
+  for (i in 2:nrow(item_map)) {
+    d
+    item_nm <- item_map[i, "ITEM_NM"]
+    data_for_condi <- tlds %>% 
+      # filter(hour(DTCT_TS) < 5 , hour(DTCT_TS) >= 4) %>% 
+      filter(hour(DTCT_TS) < CONDI_TABLE$EXCEPT_TS_LOWER , hour(DTCT_TS) >= CONDI_TABLE$EXCEPT_TS_UPPER) %>% 
+      rename("VOLT"=item_nm) %>%  
+      select(AREA_ID, DEV_GUBUN, DTCT_TS, DEV_NM, VOLT, OCCUPNCY_YN)
+    
+    data_for_condi <- data_for_condi %>% 
+      group_by(AREA_ID, DEV_GUBUN, DEV_NM) %>% 
+      summarise(DTCT_TS = DTCT_TS, 
+                VOLT = VOLT, 
+                VOLT_LAG1 = lag(VOLT, 1), 
+                OCCUPNCY_YN = OCCUPNCY_YN, 
+                OCCUPNCY_YN_LAG1 = lag(OCCUPNCY_YN, 1)) %>% 
+      ungroup() %>% 
+      filter(OCCUPNCY_YN == 1 & (OCCUPNCY_YN_LAG1 == 0 | is.na(OCCUPNCY_YN_LAG1)))
+    
+    add_data <- data_for_condi %>% 
+      filter(OCCUPNCY_YN == 1 & is.na(OCCUPNCY_YN_LAG1))
+    
+    add_value_tlds <- add_value_tlds_all %>% 
+      rename("VOLT_LAG1" = item_nm) %>% 
+      select(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, VOLT_LAG1, OCCUPNCY_YN_LAG1) %>% 
+      drop_na(VOLT_LAG1) %>% 
+      select(-DTCT_TS) %>% 
+      as.data.frame()
+    
+    add_data <- add_data %>% 
+      select(-VOLT_LAG1, - OCCUPNCY_YN_LAG1) %>% 
+      left_join(add_value_tlds, by = c("AREA_ID", "DEV_GUBUN", "DEV_NM")) %>% 
+      drop_na(OCCUPNCY_YN_LAG1)
+    
+    data_for_condi <- data_for_condi %>% 
+      filter(OCCUPNCY_YN == 1 & OCCUPNCY_YN_LAG1 == 0) %>% 
+      bind_rows(add_data)
+    
+    
+    data_for_condi <- data_for_condi %>% 
+      filter(OCCUPNCY_YN == 1 & OCCUPNCY_YN_LAG1 == 0) %>% 
+      filter(VOLT >= VOLT_LAG1) %>% 
+      mutate(MSG = glue("{item_nm} 점유 전 : {VOLT_LAG1}, {item_nm} 점유 후 : {VOLT},")) %>% 
+      mutate(CONDI_ID = ifelse(DEV_GUBUN == '100_TLDS_AF', 
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_AF'))$CONDI_ID[1], 
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_IMP'))$CONDI_ID[1]), ITEM_NM = item_nm) %>% 
+      select(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, ITEM_NM, CONDI_ID, MSG)
+    
+    condi_detect_type_1 <- bind_rows(condi_detect_type_1, data_for_condi)  
+  }
+  
+  condi_detect_type_1 <- dcast(condi_detect_type_1, AREA_ID+DEV_GUBUN+DEV_NM+DTCT_TS+CONDI_ID~ITEM_NM, value.var = "MSG") 
+  
+  condi_detect_type_1 <- condi_detect_type_1 %>% 
+    unite(MSG, condi_detect_type_1 %>% select(-c(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, CONDI_ID)) %>% names(), sep = ' ') %>% 
+    mutate(MSG =  str_remove_all(glue('"DTCT_TS" : "{DTCT_TS}", "MSG" : "{MSG}"'),'NA')) %>% 
+    mutate(MSG = paste("{",MSG, "}", sep=""))
+  
+  
+  # write_csv(condi_detect_type_1, path =  'D:/condi_detect_type_1.csv', na = 'NULL')
+  # 
+  # dbWriteTable(conn = con, name = "ret_condi_test", value = 'D:/condi_detect_type_1.csv', overwrite = F, append = T, row.names = F)
+  # 
+  # file.remove('D:/condi_detect_type_1.csv')
+  
+  
+  
+  
+  
+  
+  
+  # ------------------------------------------- condi_0002 -------------------------------------------------
+  # 이상 검측값
+  
+  condi_detect_type_2 <- data.frame()
+  
+  item_map <- data.frame(ITEM_NM = c("MAJOR_TX_VOLT", "MINR_TX_VOLT", "MAJOR_RX_VOLT", "MINR_RX_VOLT"))
+  
+  data_for_condi <- tlds %>% 
+    filter(hour(DTCT_TS) < 22 , hour(DTCT_TS) >= 4) %>%
+    mutate(DTCT_TS = time.root[roop, "MIN_DTCT_TS"]) %>% 
+    filter(OCCUPNCY_YN != 1) %>%
+    select(AREA_ID, DTCT_TS, DEV_GUBUN, DEV_NM, contains("_STATE")) 
+  
+  
+  for (i in 1:nrow(item_map)) {
+    
+    item_nm <- paste0(item_map[i, "ITEM_NM"], "_STATE")
+    condi_id <- item_map[i, "CONDI_ID"]
+    
+    data_for_condi_one <- data_for_condi %>% 
+      select(c("AREA_ID", "DTCT_TS", "DEV_GUBUN", "DEV_NM", item_nm)) %>% 
+      group_by(AREA_ID, DTCT_TS, DEV_GUBUN, DEV_NM) %>% 
+      summarise(NORMAL_CNT = sum(get(item_nm) == "300_001", na.rm = T),
+                ATTN_CNT = sum(get(item_nm) == "300_002", na.rm = T),
+                WARN_CNT = sum(get(item_nm) == "300_003", na.rm = T),
+                DL_CNT = sum(get(item_nm) == "300_004", na.rm = T),) %>%
+      
+      ungroup() %>% 
+      mutate(nol_prop = round(NORMAL_CNT/(NORMAL_CNT+DL_CNT) * 100,2), sl_prop = round(DL_CNT/(NORMAL_CNT+DL_CNT) * 100,2)) %>% 
+      filter(sl_prop >= 40) %>% 
+      mutate(CONDI_ID = CONDI_TABLE$CONDI_ID[2], MSG = glue('"정상" : {NORMAL_CNT}, "주의" : {ATTN_CNT}, "경고" : {WARN_CNT}, "조치" : {DL_CNT}' )) %>% 
+      mutate(MSG = paste("{", MSG, "}", sep = ""))
+    
+    
+    condi_detect_type_2 <- bind_rows(condi_detect_type_2, data_for_condi_one) %>%
+      select(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, CONDI_ID, MSG)
+  }
+  
+  # write_csv(condi_detect_type_2, path =  'D:/condi_detect_type_2.csv', na = 'NULL')
+  # 
+  # dbWriteTable(conn = con, name = "ret_condi_test", value = 'D:/condi_detect_type_2.csv', overwrite = F, append = T, row.names = F)
+  # 
+  # file.remove('D:/condi_detect_type_2.csv')
+  
+  
+  
+  
+  
+  # ------------------------------------------- condi_0003 -----------------------------------------------
+  # 주파수 기준치 이상 검측값 
+  
+  
+  condi_detect_type_3 <- data.frame()
+  
+  item_map <- data.frame(ITEM_NM = c('R1_DC'))
+  
+  for (i in 1:nrow(item_map)){
+    item_nm <- item_map[i, "ITEM_NM"]
+    
+    data_for_condi_one <- tlds %>% filter(hour(DTCT_TS) < 22 , hour(DTCT_TS) >= 4) %>% left_join(tlds %>% 
+                                                                                                   mutate(DTCT_TS2 = DTCT_TS %>% substr(1, 13) %>% paste0(":00:00.0001") %>% ymd_hms(tz = "Asia/Seoul")) %>% 
+                                                                                                   group_by(AREA_ID, DTCT_TS2, DEV_GUBUN, DEV_NM) %>%
+                                                                                                   mutate(DIFF = get(item_nm) - shift(get(item_nm))) %>% 
+                                                                                                   filter(DIFF == 0) %>% 
+                                                                                                   ungroup() %>%
+                                                                                                   select(AREA_ID, DEV_NM, item_nm) %>% 
+                                                                                                   rename(STANDARD = item_nm) %>% unique()) %>% 
+      filter(abs(get(item_nm) - STANDARD) > 0.2) %>% 
+      mutate(CONDI_ID = (CONDI_TABLE %>% 
+                           filter(DEV_GUBUN =='100_TLDS_IMP'))$CONDI_ID[3], MSG = glue('"주파수 기준값 이상" : {get(item_nm)}' )) %>%
+      # filter(DEV_GUBUN =='100_TLDS_IMP'))$CONDI_ID[3], MSG = glue('{' , '주파수 이상 검측값 : {get(item_nm)}','}' )) %>%
+      select(-STANDARD)
+    
+    condi_detect_type_3 <- bind_rows(condi_detect_type_3, data_for_condi_one)
+    
+  }
+  
+  # write_csv(condi_detect_type_3 %>% select(dbListFields(con,'ret_condi_test')), path =  'D:/condi_detect_type_3.csv', na = 'NULL')
+  # 
+  # dbWriteTable(conn = con, name = "ret_condi_test", value = 'D:/condi_detect_type_3.csv', overwrite = F, append = T, row.names = F)
+  # 
+  # file.remove('D:/condi_detect_type_3.csv')
+  
+  
+  
+  for (i in 1:nrow(item_map)){
+    item_nm <- item_map[i,"ITEM_NM"]
+    
+    data_for_condi_one <- tlds %>%
+      filter(hour(DTCT_TS) < 22 , hour(DTCT_TS) >= 4) 
+    
+    value <- (data_for_condi_one %>% 
+                count(get(item_nm)))[order((data_for_condi_one %>% 
+                                              count(get(item_nm)))$n, decreasing=T),1][1]
+    
+    data_for_condi_one <- data_for_condi_one %>% filter(get(item_nm) != value) %>% 
+      mutate(MSG = glue('발생 시간 : {DTCT_TS}, 유지 검측값 : {value}, 이상 검측값 : {get(item_nm)}'), 
+             DTCT_TS = DTCT_TS %>% substr(1, 11) %>% paste0("00:00:00.0001") %>% ymd_hms(tz = "Asia/Seoul")) %>% 
+      select(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, MSG)
+  }
+  
+  
+  
+  # ------------------------------------------- condi_0004 -----------------------------------------------
+  # 비점유시 검측값 이상
+  
+  condi_detect_type_4 <- data.frame()
+  condi_detect_type_5 <- data.frame()
+  
+  item_map <- data.frame(ITEM_NM = c('MAJOR_TX_VOLT', 'MINR_TX_VOLT', 'MAJOR_RX_VOLT', 'MINR_RX_VOLT'))
+  
+  major_tx <- dbGetQuery(con, glue("select a.AREA_ID, a.DEV_NM, a.MAJOR_TX_VOLT_UPPER,a.MAJOR_TX_VOLT_LOWER
+                                    from 
+                                      (SELECT ps.AREA_ID, ps.ITEM_NM AS DEV_NM , 
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Tx+' then pss.LOWER_LIMIT_D else null end as 'MAJOR_TX_VOLT_LOWER',
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Tx+' then pss.UPPER_LIMIT_D else null end as 'MAJOR_TX_VOLT_UPPER'  
+                                    	from sn001_phm.protocol_spec ps  
+                                    	join protocol_spec_set pss on ps.PROTOCOL_ID = pss.PROTOCOL_ID 
+                                    	where SYS_ID = 102
+                                    	and MAPPING_USE = 1
+                                    	and ITEM_SUB_NM not like '%V%'
+                                    	group by  ps.AREA_ID,ps.ITEM_NM, SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1)) a 
+                                  	where length( a.MAJOR_TX_VOLT_UPPER)  >0 "))
+  
+  minr_tx <- dbGetQuery(con, glue("select a.AREA_ID, a.DEV_NM, a.MINR_TX_VOLT_UPPER,a.MINR_TX_VOLT_LOWER
+                                    from 
+                                      (SELECT ps.AREA_ID, ps.ITEM_NM AS DEV_NM , 
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Tx-' then pss.LOWER_LIMIT_D else null end as 'MINR_TX_VOLT_LOWER',
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Tx-' then pss.UPPER_LIMIT_D else null end as 'MINR_TX_VOLT_UPPER'  
+                                    	from sn001_phm.protocol_spec ps  
+                                    	join protocol_spec_set pss on ps.PROTOCOL_ID = pss.PROTOCOL_ID 
+                                    	where SYS_ID = 102
+                                    	and MAPPING_USE = 1
+                                    	and ITEM_SUB_NM not like '%V%'
+                                    	group by  ps.AREA_ID,ps.ITEM_NM, SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1)) as a 
+                                  	where length( a.MINR_TX_VOLT_UPPER)  >0 "))
+  
+  major_rx <- dbGetQuery(con, glue("select a.AREA_ID, a.DEV_NM, a.MAJOR_RX_VOLT_UPPER, a.MAJOR_RX_VOLT_LOWER
+                                    from 
+                                      (SELECT ps.AREA_ID, ps.ITEM_NM AS DEV_NM , 
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Rx+' then pss.LOWER_LIMIT_D else null end as 'MAJOR_RX_VOLT_LOWER',
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Rx+' then pss.UPPER_LIMIT_D else null end as 'MAJOR_RX_VOLT_UPPER'  
+                                    	from sn001_phm.protocol_spec ps  
+                                    	join protocol_spec_set pss on ps.PROTOCOL_ID = pss.PROTOCOL_ID 
+                                    	where SYS_ID = 102
+                                    	and MAPPING_USE = 1
+                                    	and ITEM_SUB_NM not like '%V%'
+                                    	group by  ps.AREA_ID,ps.ITEM_NM, SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1)) as a 
+                                  	where length( a.MAJOR_RX_VOLT_UPPER)  >0 "))
+  
+  minr_rx <- dbGetQuery(con, glue("select a.AREA_ID, a.DEV_NM, a.MINR_RX_VOLT_UPPER,a.MINR_RX_VOLT_LOWER
+                                    from 
+                                      (SELECT ps.AREA_ID, ps.ITEM_NM AS DEV_NM , 
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Rx-' then pss.LOWER_LIMIT_D else null end as 'MINR_RX_VOLT_LOWER',
+                                      	    case when SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1) like 'Rx-' then pss.UPPER_LIMIT_D else null end as 'MINR_RX_VOLT_UPPER'  
+                                    	from sn001_phm.protocol_spec ps  
+                                    	join protocol_spec_set pss on ps.PROTOCOL_ID = pss.PROTOCOL_ID 
+                                    	where SYS_ID = 102
+                                    	and MAPPING_USE = 1
+                                    	and ITEM_SUB_NM not like '%V%'
+                                    	group by  ps.AREA_ID,ps.ITEM_NM, SUBSTRING_INDEX(ps.ITEM_SUB_NM , '_', -1)) as a 
+                                  	where length( a.MINR_RX_VOLT_UPPER)  >0 "))
+  
+  aa <- major_tx  %>%  full_join(minr_tx)
+  aa <- aa  %>%  full_join(major_rx)
+  aa <- aa  %>%  full_join(minr_rx)
+  
+  total <- tlds %>% full_join(aa)
+  
+  for (i in 1:nrow(item_map)){
+    item_nm <- item_map[i, "ITEM_NM"]
+    
+    item_nm_U <- paste0(item_map[i, "ITEM_NM"], "_UPPER")
+    item_nm_L <- paste0(item_map[i, "ITEM_NM"], "_LOWER")
+    
+    data_for_condi_test <- total %>% 
+      filter(hour(DTCT_TS) < CONDI_TABLE$EXCEPT_TS_LOWER , hour(DTCT_TS) >= CONDI_TABLE$EXCEPT_TS_UPPER) %>% 
+      rename("VOLT"=item_nm) %>%  
+      filter(OCCUPNCY_YN==0) %>%  
+      select(AREA_ID, DEV_GUBUN, DTCT_TS, DEV_NM, VOLT,  OCCUPNCY_YN, item_nm_L,item_nm_U ) 
+    
+    data_for_condi_test[, 7] = as.numeric(data_for_condi_test[, 7])
+    data_for_condi_test[, 8] = as.numeric(data_for_condi_test[, 8])
+    
+    error <- data_for_condi_test  %>% 
+      filter(get(item_nm_L) > VOLT | get(item_nm_U) < VOLT) %>% 
+      filter(get(item_nm_L) > 0 | get(item_nm_U) > 0)
+  
+    data_for_condi5 <- error %>%
+      mutate(MSG = glue('"{item_nm} 전압값" : {VOLT}, "경고 하한값" : {get(item_nm_L)}, "경고 상한값" : {get(item_nm_U)}')) %>%
+      mutate(CONDI_ID = ifelse(DEV_GUBUN == '100_TLDS_AF',
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_AF'))$CONDI_ID[2],
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_IMP'))$CONDI_ID[2]), ITEM_NM = item_nm) %>%
+      select(AREA_ID, DEV_GUBUN,ITEM_NM, DEV_NM, DTCT_TS, CONDI_ID, MSG)%>%
+      mutate(MSG = paste("{",MSG, "}", sep=""))
+
+    condi_detect_type_5 <- bind_rows(condi_detect_type_5, data_for_condi5)
+    
+    
+    error2 <- error %>%
+      group_by(AREA_ID, DTCT_TS,DEV_GUBUN, DEV_NM)
+
+    error2 <- cbind(error2, hour = substr(error2$DTCT_TS, 1, 13))
+    
+    error3 <- error2 %>%
+      group_by(AREA_ID, hour, DEV_GUBUN, DEV_NM) %>%
+      summarise(n = n() , na.rm = T)
+    
+    data_for_condi4 <- error3 %>%
+      mutate(MSG = glue('{item_nm} 기준치 초과 {n}개')) %>%
+      mutate(CONDI_ID = ifelse(DEV_GUBUN == '100_TLDS_AF',
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_AF'))$CONDI_ID[2],
+                               (CONDI_TABLE %>% filter(DEV_GUBUN == '100_TLDS_IMP'))$CONDI_ID[2]), ITEM_NM = item_nm) %>%
+      select(AREA_ID, DEV_GUBUN,ITEM_NM, DEV_NM, hour, CONDI_ID, MSG)
+    
+
+
+    condi_detect_type_4 <- bind_rows(condi_detect_type_4, data_for_condi4)
+    
+   
+    
+  }
+  
+  condi_detect_type_test <- dcast(condi_detect_type_4, AREA_ID+DEV_GUBUN+DEV_NM+hour+CONDI_ID~ITEM_NM, value.var = "MSG")
+
+  condi_detect_type_test <- condi_detect_type_test %>%
+    unite(MSG, condi_detect_type_test %>% select(-c(AREA_ID,DEV_GUBUN, DEV_NM, hour, CONDI_ID)) %>% names(), sep = ' ') %>%
+    mutate(MSG =  str_remove_all(glue('"DTCT_TS" : "{hour}", "MSG"  : "{MSG}"'),'NA')) %>%
+    mutate(MSG = paste("{",MSG, "}", sep=""))
+  
+}
+# write_csvcondi_detect_type_5 %>% select(dbListFields(con,'ret_condi_test5')), path =  'D:/condi_detect_type_5.csv', na = 'NULL')
+# 
+# dbWriteTable(conn = con, name = "ret_condi_test5", value = 'D:/condi_detect_type_5.csv', overwrite = F, append = T, row.names = F)
+# 
+# file.remove('D:/condi_detect_type_5.csv')
+
+
+
+# write_csv(condi_detect_type_test %>% select(dbListFields(con,'ret_condi_test4')), path =  'D:/condi_detect_type_4.csv', na = 'NULL')
+# 
+# dbWriteTable(conn = con, name = "ret_condi_test4", value = 'D:/condi_detect_type_4.csv', overwrite = F, append = T, row.names = F)
+# 
+# file.remove('D:/condi_detect_type_4.csv')
+
+
+
+
+
+for (i in 1:nrow(item_map)){
+  item_nm <- item_map[i,"ITEM_NM"]
+  
+  data_for_condi_one <- tlds %>%
+    filter(hour(DTCT_TS) < 22 , hour(DTCT_TS) >= 4) 
+  
+  value <- (data_for_condi_one %>% 
+              count(get(item_nm)))[order((data_for_condi_one %>% 
+                                            count(get(item_nm)))$n, decreasing=T),1][1]
+  
+  data_for_condi_one <- data_for_condi_one %>% filter(get(item_nm) != value) %>% 
+    mutate(MSG = glue('발생 시간 : {DTCT_TS}, 유지 검측값 : {value}, 이상 검측값 : {get(item_nm)}'), 
+           DTCT_TS = DTCT_TS %>% substr(1, 11) %>% paste0("00:00:00.0001") %>% ymd_hms(tz = "Asia/Seoul")) %>% 
+    select(AREA_ID, DEV_GUBUN, DEV_NM, DTCT_TS, MSG)
+}
+
+
+
+}
